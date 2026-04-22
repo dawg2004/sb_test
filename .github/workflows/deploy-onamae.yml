@@ -32,7 +32,9 @@ jobs:
           install -m 700 -d ~/.ssh
           printf "%s" "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
-          ssh-keyscan -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+          CLEAN_SSH_HOST=$(printf "%s" "$SSH_HOST" | tr -d "\r\n[:space:]")
+          CLEAN_SSH_PORT=$(printf "%s" "$SSH_PORT" | tr -d "\r\n[:space:]")
+          ssh-keyscan -p "$CLEAN_SSH_PORT" "$CLEAN_SSH_HOST" >> ~/.ssh/known_hosts
           chmod 644 ~/.ssh/known_hosts
 
       - name: Upload archive
@@ -50,7 +52,10 @@ jobs:
           SSH_USER: ${{ secrets.SSH_USER }}
           REMOTE_PATH: ${{ secrets.REMOTE_PATH }}
         run: |
-          ssh -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" "
+          CLEAN_SSH_HOST=$(printf "%s" "$SSH_HOST" | tr -d "\r\n[:space:]")
+          CLEAN_SSH_PORT=$(printf "%s" "$SSH_PORT" | tr -d "\r\n[:space:]")
+          CLEAN_SSH_USER=$(printf "%s" "$SSH_USER" | tr -d "\r\n[:space:]")
+          ssh -p "$CLEAN_SSH_PORT" "$CLEAN_SSH_USER@$CLEAN_SSH_HOST" "
             set -eu
             TS=\$(date +%Y%m%d-%H%M%S)
             mkdir -p \"$REMOTE_PATH\"

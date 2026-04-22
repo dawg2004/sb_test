@@ -26,93 +26,65 @@ jobs:
             --exclude='.env' \
             -czf /tmp/deploy.tar.gz .
           ls -lh /tmp/deploy.tar.gz
-          echo "✅ Archive prepared"
 
-      - name: Setup SSH key and known_hosts
+      - name: Setup SSH
         env:
           SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
-          SSH_HOST: ${{ secrets.SSH_HOST }}
-          SSH_PORT: ${{ secrets.SSH_PORT }}
         run: |
-          echo "🔐 Setting up SSH connection..."
-          
-          # SSH ディレクトリの作成
-          install -m 700 -d ~/.ssh
-          
-          # SSH鍵の書き込み
-          printf "%s" "$SSH_PRIVATE_KEY" | sed 's/\\n/\n/g' | tr -d "\r" > ~/.ssh/id_ed25519
+          echo "🔐 Setting up SSH..."
+          mkdir -p ~/.ssh
+          echo "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
           
-          # SSH設定ファイルの作成
+          # SSH設定
           cat > ~/.ssh/config << 'EOF'
-          Host onamae
-            User ${{ secrets.SSH_USER }}
-            HostName ${{ secrets.SSH_HOST }}
-            Port ${{ secrets.SSH_PORT }}
-            IdentityFile ~/.ssh/id_ed25519
+          Host *
             StrictHostKeyChecking accept-new
             UserKnownHostsFile ~/.ssh/known_hosts
             ConnectTimeout 10
-            ServerAliveInterval 60
-            ServerAliveCountMax 3
-            ControlMaster auto
-            ControlPath ~/.ssh/control-%C
-            ControlPersist 600
+            BatchMode yes
           EOF
           chmod 600 ~/.ssh/config
-          
-          # known_hosts の取得
-          CLEAN_SSH_HOST=$(printf "%s" "${{ secrets.SSH_HOST }}" | tr -d "\r\n[:space:]")
-          CLEAN_SSH_PORT=$(printf "%s" "${{ secrets.SSH_PORT }}" | tr -d "\r\n[:space:]")
-          echo "🔑 Scanning host key for $CLEAN_SSH_HOST:$CLEAN_SSH_PORT..."
-          ssh-keyscan -T 10 -p "$CLEAN_SSH_PORT" "$CLEAN_SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null || echo "⚠️ Host key scan completed with status $?"
-          chmod 644 ~/.ssh/known_hosts
-          
-          # SSH接続テスト
-          echo "📡 Testing SSH connection..."
-          ssh -v -p ${{ secrets.SSH_PORT }} ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} "echo '✅ SSH connection successful'; whoami; pwd" || exit 1
+          echo "✅ SSH configured"
 
-      - name: Upload archive
+      - name: Test SSH connection
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_PORT: ${{ secrets.SSH_PORT }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+        run: |
+          echo "📡 Testing SSH connection to $SSH_USER@$SSH_HOST:$SSH_PORT..."
+          ssh -o StrictHostKeyChecking=accept-new \
+              -o ConnectTimeout=10 \
+              -p "$SSH_PORT" \
+              "$SSH_USER@$SSH_HOST" \
+              "echo '✅ SSH connection successful' && pwd && whoami" || {
+            echo "❌ SSH connection failed"
+            exit 1
+          }
+
+      - name: Upload archive via SCP
         env:
           SSH_HOST: ${{ secrets.SSH_HOST }}
           SSH_PORT: ${{ secrets.SSH_PORT }}
           SSH_USER: ${{ secrets.SSH_USER }}
         run: |
           echo "📤 Uploading deployment archive..."
+          ARCHIVE_NAME="sb_test-${GITHUB_SHA:0:7}.tar.gz"
           
-          # リトライ付きでファイルアップロード
-          MAX_RETRIES=3
-          RETRY_COUNT=0
-          
-          while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
-            echo "📤 Upload attempt $((RETRY_COUNT + 1))/$MAX_RETRIES"
-            
-            if scp -v \
-              -P "${{ secrets.SSH_PORT }}" \
-              -o ConnectTimeout=10 \
+          scp -P "$SSH_PORT" \
               -o StrictHostKeyChecking=accept-new \
+              -o ConnectTimeout=10 \
               /tmp/deploy.tar.gz \
-              "${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:/tmp/sb_test-${GITHUB_SHA}.tar.gz"; then
-              
-              echo "✅ Upload successful"
-              
-              # アップロード確認
-              ssh -p ${{ secrets.SSH_PORT }} ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} "ls -lh /tmp/sb_test-${GITHUB_SHA}.tar.gz"
-              exit 0
-            fi
-            
-            RETRY_COUNT=$((RETRY_COUNT + 1))
-            if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
-              WAIT_TIME=$((RETRY_COUNT * 5))
-              echo "⏳ Retrying in ${WAIT_TIME}s..."
-              sleep $WAIT_TIME
-            fi
-          done
+              "$SSH_USER@$SSH_HOST:/tmp/$ARCHIVE_NAME" || {
+            echo "❌ Upload failed"
+            exit 1
+          }
           
-          echo "❌ Upload failed after $MAX_RETRIES attempts"
-          exit 1
+          echo "✅ Upload successful"
+          ssh -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" "ls -lh /tmp/$ARCHIVE_NAME"
 
-      - name: Backup and deploy (non-destructive)
+      - name: Deploy files
         env:
           SSH_HOST: ${{ secrets.SSH_HOST }}
           SSH_PORT: ${{ secrets.SSH_PORT }}
@@ -120,57 +92,68 @@ jobs:
           REMOTE_PATH: ${{ secrets.REMOTE_PATH }}
         run: |
           echo "🚀 Starting deployment..."
+          ARCHIVE_NAME="sb_test-${GITHUB_SHA:0:7}.tar.gz"
           
-          ssh -v -p ${{ secrets.SSH_PORT }} ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} bash << 'ENDSSH'
-            set -eu
-            
-            GITHUB_SHA="${{ github.sha }}"
-            REMOTE_PATH="${{ secrets.REMOTE_PATH }}"
-            
-            echo "📂 Creating directories..."
-            mkdir -p "$REMOTE_PATH"
-            mkdir -p "$REMOTE_PATH/.backups"
-            
-            # パーミッション確認
-            echo "🔍 Checking permissions..."
-            ls -ld "$REMOTE_PATH"
-            
-            # バックアップ作成（既存ファイルがある場合）
-            if [ -n "$(find "$REMOTE_PATH" -mindepth 1 -maxdepth 1 ! -name '.backups' -print -quit 2>/dev/null || true)" ]; then
-              TS=$(date +%Y%m%d-%H%M%S)
-              echo "💾 Backing up existing files to predeploy-$TS.tar.gz..."
-              tar -czf "$REMOTE_PATH/.backups/predeploy-$TS.tar.gz" \
-                --exclude='.backups' \
-                -C "$REMOTE_PATH" . || echo "⚠️ Backup creation had issues, continuing..."
-              echo "✅ Backup completed"
-            else
-              echo "ℹ️ No existing files to backup"
-            fi
-            
-            # 展開処理
-            echo "📦 Extracting deployment archive..."
-            tar -tzf /tmp/sb_test-$GITHUB_SHA.tar.gz | head -20
-            tar -xzf /tmp/sb_test-$GITHUB_SHA.tar.gz -C "$REMOTE_PATH"
-            echo "✅ Archive extracted"
-            
-            # 不要なファイル削除
-            echo "🧹 Cleaning up..."
-            rm -f /tmp/sb_test-$GITHUB_SHA.tar.gz
-            
-            # デプロイ完了確認
-            echo "📋 Deployed files:"
-            ls -la "$REMOTE_PATH" | head -20
-            echo "✅ Deployment completed successfully"
-          ENDSSH
+          ssh -p "$SSH_PORT" \
+              -o StrictHostKeyChecking=accept-new \
+              -o ConnectTimeout=10 \
+              "$SSH_USER@$SSH_HOST" << EOF
+          set -e
+          echo "📂 Working directory: \$(pwd)"
+          echo "📋 Creating directories..."
+          mkdir -p "$REMOTE_PATH"
+          mkdir -p "$REMOTE_PATH/.backups"
           
-          echo "🎉 All deployment steps completed"
-
-      - name: Deployment notification
-        if: always()
-        run: |
-          if [ ${{ job.status }} == 'success' ]; then
-            echo "✅ Deployment to luxewave.jp successful!"
+          echo "✅ Directories created"
+          echo "💾 Backing up existing files..."
+          
+          if [ -d "$REMOTE_PATH" ] && [ -n "\$(find $REMOTE_PATH -maxdepth 1 ! -name '.backups' ! -name '.' ! -name '..' -print -quit 2>/dev/null || true)" ]; then
+            BACKUP_TIME=\$(date +%Y%m%d-%H%M%S)
+            tar -czf "$REMOTE_PATH/.backups/predeploy-\$BACKUP_TIME.tar.gz" \\
+              --exclude='.backups' \\
+              -C "$REMOTE_PATH" . 2>/dev/null || true
+            echo "✅ Backup created: predeploy-\$BACKUP_TIME.tar.gz"
           else
-            echo "❌ Deployment failed. Check logs above."
-            exit 1
+            echo "ℹ️  No existing files to backup"
           fi
+          
+          echo "📦 Extracting archive..."
+          tar -xzf "/tmp/$ARCHIVE_NAME" -C "$REMOTE_PATH"
+          
+          echo "🧹 Cleaning up..."
+          rm -f "/tmp/$ARCHIVE_NAME"
+          
+          echo "📋 Deployed files:"
+          ls -la "$REMOTE_PATH" | head -15
+          
+          echo "✅ Deployment completed successfully"
+          EOF
+
+      - name: Verify deployment
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_PORT: ${{ secrets.SSH_PORT }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          REMOTE_PATH: ${{ secrets.REMOTE_PATH }}
+        run: |
+          echo "🔍 Verifying deployment..."
+          ssh -p "$SSH_PORT" \
+              -o StrictHostKeyChecking=accept-new \
+              "$SSH_USER@$SSH_HOST" \
+              "test -f '$REMOTE_PATH/webhook.php' && echo '✅ webhook.php found' || (echo '❌ webhook.php not found' && exit 1)"
+          
+          ssh -p "$SSH_PORT" \
+              -o StrictHostKeyChecking=accept-new \
+              "$SSH_USER@$SSH_HOST" \
+              "test -f '$REMOTE_PATH/api_utils.php' && echo '✅ api_utils.php found' || (echo '❌ api_utils.php not found' && exit 1)"
+          
+          echo "✅ All critical files verified"
+
+      - name: Success notification
+        if: success()
+        run: |
+          echo "🎉 Deployment to luxewave.jp completed successfully!"
+          echo "📝 Check the deployed files:"
+          echo "   - webhook.php (webhook handler)"
+          echo "   - api_utils.php (API utilities)"
+          echo "   - setup_webhook.php (webhook setup)"

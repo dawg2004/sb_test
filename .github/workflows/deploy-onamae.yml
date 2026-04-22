@@ -30,7 +30,7 @@ jobs:
           SSH_PORT: ${{ secrets.SSH_PORT }}
         run: |
           install -m 700 -d ~/.ssh
-          printf "%s" "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
+          printf "%s" "$SSH_PRIVATE_KEY" | sed 's/\\n/\n/g' | tr -d "\r" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
           CLEAN_SSH_HOST=$(printf "%s" "$SSH_HOST" | tr -d "\r\n[:space:]")
           CLEAN_SSH_PORT=$(printf "%s" "$SSH_PORT" | tr -d "\r\n[:space:]")

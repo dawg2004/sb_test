@@ -1,0 +1,67 @@
+name: Deploy to Onamae Rental Server
+
+on:
+  push:
+    branches:
+      - main
+      - master
+      - work
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare deploy archive
+        run: |
+          tar \
+            --exclude='.git' \
+            --exclude='.github' \
+            --exclude='.DS_Store' \
+            -czf deploy.tar.gz .
+
+      - name: Setup SSH key and known_hosts
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_PORT: ${{ secrets.SSH_PORT }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf "%s" "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+
+      - name: Upload archive
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_PORT: ${{ secrets.SSH_PORT }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+        run: |
+          scp -P "$SSH_PORT" deploy.tar.gz "$SSH_USER@$SSH_HOST:/tmp/sb_test-${GITHUB_SHA}.tar.gz"
+
+      - name: Backup and deploy (non-destructive)
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_PORT: ${{ secrets.SSH_PORT }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          REMOTE_PATH: ${{ secrets.REMOTE_PATH }}
+        run: |
+          ssh -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" "
+            set -eu
+            TS=\$(date +%Y%m%d-%H%M%S)
+            mkdir -p \"$REMOTE_PATH\"
+            mkdir -p \"$REMOTE_PATH/.backups\"
+
+            if [ -n \"\$(find \"$REMOTE_PATH\" -mindepth 1 -maxdepth 1 ! -name '.backups' -print -quit)\" ]; then
+              tar -czf \"$REMOTE_PATH/.backups/predeploy-\$TS.tar.gz\" \
+                --exclude='.backups' \
+                -C \"$REMOTE_PATH\" .
+            fi
+
+            tar -xzf /tmp/sb_test-${GITHUB_SHA}.tar.gz -C \"$REMOTE_PATH\"
+            rm -f /tmp/sb_test-${GITHUB_SHA}.tar.gz
+          "
